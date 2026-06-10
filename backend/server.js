@@ -1,6 +1,5 @@
 const express = require("express");
-const sqlite3 = require("sqlite3").verbose();
-const fs = require("fs");
+const mysql = require('mysql2');
 const path = require("path");
 const cors = require("cors");
 
@@ -10,75 +9,27 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// SQLite database setup
-const dataFolder = path.join(__dirname, "data");
-if (!fs.existsSync(dataFolder)) {
-  fs.mkdirSync(dataFolder, { recursive: true });
-}
+// 🔌 MySQL Database Connection Setup
+const db = mysql.createConnection({
+  host: '127.0.0.1',
+  user: 'root',
+  password: '', // Leave empty since your Codespace doesn't require a password
+  database: 'ticket_booking_system'
+});
 
-const dbPath = path.join(dataFolder, "ticketdb.sqlite");
-const db = new sqlite3.Database(dbPath, (err) => {
+db.connect((err) => {
   if (err) {
     console.error("Database connection failed ❌", err);
     return;
   }
-  console.log("✅ SQLite database connected successfully!");
-});
-
-// Initialize tables and seed sample data when needed
-const initSql = `
-CREATE TABLE IF NOT EXISTS tickets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_name TEXT NOT NULL,
-  available_seats INTEGER NOT NULL,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS bookings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  customer_name TEXT NOT NULL,
-  ticket_id INTEGER NOT NULL,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
-);
-`;
-
-db.serialize(() => {
-  db.exec(initSql, (err) => {
-    if (err) {
-      console.error("Failed to create tables:", err);
-      return;
-    }
-
-    db.get("SELECT COUNT(*) AS count FROM tickets", (err, row) => {
-      if (err) {
-        console.error("Failed to count tickets:", err);
-        return;
-      }
-
-      if (row.count === 0) {
-        const insertTickets = `INSERT INTO tickets (event_name, available_seats) VALUES
-          ('College Symposium', 50),
-          ('Tech Fest 2026', 100),
-          ('Music Night', 75),
-          ('Sports Championship', 200),
-          ('Science Exhibition', 60)
-        `;
-        db.run(insertTickets, (insertErr) => {
-          if (insertErr) {
-            console.error("Failed to seed tickets:", insertErr);
-          }
-        });
-      }
-    });
-  });
+  console.log("✅ MySQL Database connected successfully!");
 });
 
 // ============== API Routes ==============
 
 // 1. Get all tickets
 app.get("/api/tickets", (req, res) => {
-  db.all("SELECT * FROM tickets", (err, rows) => {
+  db.query("SELECT * FROM tickets", (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows);
   });
@@ -96,12 +47,12 @@ app.post("/api/tickets", (req, res) => {
     return res.status(400).json({ error: "Available seats must be a positive number" });
   }
 
-  db.run(
+  db.query(
     "INSERT INTO tickets (event_name, available_seats) VALUES (?, ?)",
     [event_name, seats],
-    function (err) {
+    (err, result) => {
       if (err) return res.status(500).json({ error: err.message });
-      res.json({ message: "✅ Event added successfully!", ticket_id: this.lastID });
+      res.json({ message: "✅ Event added successfully!", ticket_id: result.insertId });
     }
   );
 });
@@ -113,23 +64,25 @@ app.post("/api/book", (req, res) => {
     return res.status(400).json({ error: "Customer name and ticket ID are required" });
   }
 
-  db.get("SELECT available_seats FROM tickets WHERE id = ?", [ticket_id], (err, row) => {
+  db.query("SELECT available_seats FROM tickets WHERE id = ?", [ticket_id], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (!row) return res.status(404).json({ error: "Event not found" });
+    if (rows.length === 0) return res.status(404).json({ error: "Event not found" });
+    
+    const row = rows[0];
     if (row.available_seats < 1) return res.status(400).json({ error: "No seats available" });
 
-    db.run(
+    db.query(
       "INSERT INTO bookings (customer_name, ticket_id) VALUES (?, ?)",
       [customer_name, ticket_id],
-      function (insertErr) {
+      (insertErr, result) => {
         if (insertErr) return res.status(500).json({ error: insertErr.message });
 
-        db.run(
+        db.query(
           "UPDATE tickets SET available_seats = available_seats - 1 WHERE id = ?",
           [ticket_id],
-          function (updateErr) {
+          (updateErr) => {
             if (updateErr) return res.status(500).json({ error: updateErr.message });
-            res.json({ message: "✅ Ticket Booked Successfully!", booking_id: this.lastID });
+            res.json({ message: "✅ Ticket Booked Successfully!", booking_id: result.insertId });
           }
         );
       }
@@ -149,7 +102,7 @@ app.get("/api/bookings", (req, res) => {
     ORDER BY bookings.id DESC
   `;
 
-  db.all(query, (err, rows) => {
+  db.query(query, (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows);
   });
@@ -159,18 +112,18 @@ app.get("/api/bookings", (req, res) => {
 app.delete("/api/bookings/:id", (req, res) => {
   const bookingId = req.params.id;
 
-  db.get("SELECT ticket_id FROM bookings WHERE id = ?", [bookingId], (err, row) => {
+  db.query("SELECT ticket_id FROM bookings WHERE id = ?", [bookingId], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (!row) return res.status(404).json({ error: "Booking not found" });
+    if (rows.length === 0) return res.status(404).json({ error: "Booking not found" });
 
-    const ticketId = row.ticket_id;
-    db.run("DELETE FROM bookings WHERE id = ?", [bookingId], function (deleteErr) {
+    const ticketId = rows[0].ticket_id;
+    db.query("DELETE FROM bookings WHERE id = ?", [bookingId], (deleteErr) => {
       if (deleteErr) return res.status(500).json({ error: deleteErr.message });
 
-      db.run(
+      db.query(
         "UPDATE tickets SET available_seats = available_seats + 1 WHERE id = ?",
         [ticketId],
-        function (updateErr) {
+        (updateErr) => {
           if (updateErr) return res.status(500).json({ error: updateErr.message });
           res.json({ message: "✅ Booking cancelled successfully!" });
         }
